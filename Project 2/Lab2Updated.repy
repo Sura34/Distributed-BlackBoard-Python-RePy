@@ -1,0 +1,470 @@
+# ------------------------------------------------------------------------------   
+# Start listening and handle incoming connections in board() function
+# ------------------------------------------------------------------------------   
+def start_board():
+  ip = mycontext['ip']
+  port = mycontext['port']
+  #mycontext['neighbors'] = neighbors
+  print "Listening on IP " + str(ip) +" port " + str(port)
+  try: 
+    listencommhandle = waitforconn(ip, port, board_connection_handler)
+  #default exception handler to override when we will work with a lot of sockets.
+  except Exception, e:
+    print "Exception in start_board: %s, %s\n" %(type(e), e)
+    raise
+    #pass
+# ------------------------------------------------------------------------------    
+# A function that elect a leader using Ring Topology
+# --> Important for having a single vessel to be a leader
+# ------------------------------------------------------------------------------   
+def leaderElection(message):
+       
+    #Find our index in the ring
+    myIndex = mycontext['neighbors'].index(mycontext['ip'])
+    
+    #Check to see so we haven't gone full circle and try to contact ourselves
+    if len(message.split(':')) <= len(mycontext['neighbors']):
+        
+        #Leader election process is initiating, create the first message
+        if message == '':
+            #Start building the election message
+            message += str(mycontext['ip']) + "," + str(mycontext['vesselID']) 
+        else:
+            #Leader election is underway, continue building the election message
+            
+            previous = message.split(':').pop()
+            previousID = previous.split(',').pop()
+            previousAddress = previous.split(',')
+            
+            #Check to see if our ID's are equal
+            if previousID == str(mycontext['vesselID']):
+                #We have the same ID as the previous node, check IP
+                #Convert the IP-address to an integer               
+                myaddress = int(mycontext['ip'].replace('.', ''))
+                
+                #If previous nodes address is bigger, send out his address and ID instead.
+                if int(previousAddress.replace('.', '')) >= myaddress:
+                    message += ":" + previousAddress + "," + str(previousID)
+                else:
+                    #Otherwise, send our info                    
+                    message += ":" + str(mycontext['ip']) + "," + str(mycontext['vesselID'])
+            else:
+                #Our ID's are different, send our info
+                message += ":" + str(mycontext['ip']) + "," + str(mycontext['vesselID'])
+        
+        #Vessel is not last in the ring
+        if myIndex != len(mycontext['neighbors']) - 1:
+            neighbors = mycontext['neighbors'][myIndex+1]
+            newConn = openconn(neighbors, mycontext['port'])
+            newConn.send(message)
+            newConn.close()
+                
+        #Vessel is last in the ring
+        else:
+                        
+            #print "I'm last"
+            neighbors = mycontext['neighbors'][0]
+            
+            newConn = openconn(neighbors, mycontext['port'])
+            newConn.send(message)
+            newConn.close()
+    else:
+        mycontext['lock'].acquire()
+        
+        candidates = message.split(':')
+        
+        for candidate in candidates:
+            #print candidate
+            if candidate.split(',')[1] != '':
+                if int(candidate.split(',')[1]) > mycontext['leaderID']:
+                    mycontext['leaderID'] = int(candidate.split(',')[1])
+                    mycontext['leaderip'] = candidate.split(',')[0] 
+                   
+        mycontext['lock'].release()
+    
+           
+### END OF FUNCTION leaderElection ###
+# ------------------------------------------------------------------------------    
+# Called when an incoming message is received. 
+# --> Important starting point
+# ------------------------------------------------------------------------------    
+def board_connection_handler(ip, port, sockobj, thiscommhandle, listencommhandle):
+  msgheader = ""
+  try:
+    msgheader = sockobj.recv(1024) # Receive message
+    print '****Request:\n%s' % msgheader
+    # Choosing the types of communication and reacting according to each processing type behaviour 
+    if msgheader.startswith( 'POST' ):
+      #This function is defined below and it identifies the posting types. 
+      Post_Handler(msgheader, sockobj, thiscommhandle)
+    elif msgheader.startswith( 'GET' ):
+      #This function is defined below and it basically generate an html by calling the generate_html_page 
+      GET_Handler(msgheader, sockobj, thiscommhandle)
+    elif msgheader.startswith( 'ADD' ):
+      #This function is defined below and it basically call the add_entry function so that entries will be inserted with a dynamic ID
+      ADD_Handler(msgheader, sockobj, thiscommhandle)
+    elif msgheader.startswith( 'MODIFY' ):
+      #As it defines below this function will call the update_entry fumction so that the specific entry will be updated with a new value 
+      MODIFY_Handler(msgheader, sockobj, thiscommhandle)
+    elif msgheader.startswith( 'DELETE' ):
+      #This function will delete a specific entry by using its ID after calling the finction delete_entry_byid 
+      DELETE_Handler(msgheader, sockobj, thiscommhandle)
+
+    elif msgheader.startswith( '<updMsg>' ):
+      update_from_other_vessel(msgheader, sockobj, thiscommhandle)
+
+    elif msgheader.startswith( '<msg>' ):
+       mycontext['lock'].acquire()
+       mycontext['message'] = msgheader
+       mycontext['lock'].release()
+    else:
+      #If there exist a request that is diffent that the above 5 conditions it will came here so that an appropriate output will be displayed 
+      leaderElection(msgheader)
+      #other_requests_handler(msgheader, sockobj, thiscommhandle)
+
+   # Handling an exception error if something unexpected cames up  
+  except Exception, e:
+    print "Exception in board in Main: %s, %s\n" %(type(e), e)
+    #raise
+
+# ------------------------------------------------------------------------------
+# Handles initial GET request from browser, outputs HTML string and closes socket.
+# ------------------------------------------------------------------------------
+def GET_Handler(msgheader, sockobj, thiscommhandle):
+  mycontext['board_lock'].acquire() # LOCK BOARD
+  htmlresponse = generate_html_page()
+  mycontext['board_lock'].release() # UNLOCK BOARD
+  res=make_http_response(200, 'OK', htmlresponse)
+  sockobj.send(res)
+  stopcomm(thiscommhandle) 
+
+# ------------------------------------------------------------------------------
+# Handles initial GET request from browser, outputs HTML string and closes socket.
+# ------------------------------------------------------------------------------
+def update_from_other_vessel(msgheader, sockobj, thiscommhandle):
+        mycontext['lock'].acquire()
+        port = mycontext['port']
+        print "\nI received message: " + msgheader.replace("<updMsg>", "")
+        print "\nmy current global message: " + mycontext['message']
+        mycontext['message'] += msgheader.replace("<updMsg>", "")     
+        print "\nMy updated global message: " + mycontext['message'] + "\n"
+        
+        print "============================================================\n\n"
+        #mycontext['neighbors'] contains a list of all our IP-addresses
+        #We loop through it to connect to all vessels (ourselves excluded)
+        #Then send an update to each vessel
+        for line in file("neighborlist.txt","r"):           
+            if line.strip() != mycontext['ip']:
+                try:
+                   newConn = openconn(line.strip(), port)
+                   newConn.send(mycontext['message'])
+                   newConn.close()
+                   print "Successfull"
+                except Exception,e:
+                   print "Having a trouble in propagating message:" %(type(e), e)
+            
+        mycontext['lock'].release()     
+
+# ------------------------------------------------------------------------------
+# Handles POST requests outputs HTML string and closes socket.
+# ------------------------------------------------------------------------------
+def Post_Handler(msgheader, sockobj, thiscommhandle):
+  # Extracting a query from the entry template 
+  MsgToSend = ""
+           
+         
+  #Add some control data to each message
+  MsgToSend += "<msg>" + str(round(getruntime(), 3)) + "> [" + str(mycontext['ip']) + "] said:\t "
+            
+ 
+
+  query = extract_http_request_contents(msgheader)
+  print '****Query:\n%s\n' % query
+  # extracting the query parameters so that it can identify the type of query 
+  parameters = extract_parameters_from_query(query)
+  print '****Parameters:\n%s\n' % parameters
+  MsgToSend=parameters['entry']
+  
+  #Display the user for the confirmation of the inserted entry and close the connection so that other vessls can post an entry
+  res=make_http_response(200, 'OK', 'You have successfully posted an entry')
+  sockobj.send(res)
+  stopcomm(thiscommhandle)
+  
+  # Incase of a new entry we add it to the board with an ID
+  if msgheader.startswith( 'POST /board' ):
+    add_entry(MsgToSend)
+    #send_to_leader('ADD entry=%s' % MsgToSend)
+    print "sending new message......\n"
+    print "message = " + MsgToSend
+       
+    try:
+        socket1 = openconn(mycontext['leaderip'],mycontext['port'])
+        socket1.send('<updMsg>' + MsgToSend)
+        socket1.close()
+        print "Message to the Leader is sent Successfully"
+    except Exception, e:
+        print "Send message to leader fail: %s, %s\n" %(type(e), e)   
+    
+  # Incase of update or delete we need an entry ID that needs to be updated or deleted 
+  elif msgheader.startswith( 'POST /entries' ):
+    entry_id = extract_id_from_post(msgheader)
+    print 'id=%s' %(entry_id)
+    delete_p = parameters['delete']
+    # If the pointer have a value 1 the delete command will be applied 
+    if delete_p == '1':
+      delete_entry_by_id(entry_id)
+      send_to_neighbors('DELETE id=%s&entry=%s' % (entry_id, entry_p))
+    else:
+      # If the pointer have a value different thaan 1 the update or modify command will be applied 
+      modify_entry(entry_id, entry_p)
+      send_to_neighbors('MODIFY id=%s&entry=%s' % (entry_id, entry_p))
+  #Displaying the results     
+  print('\n')
+
+# ------------------------------------------------------------------------------
+# Handles ADD requests outputs nothing and closes socket.
+# ------------------------------------------------------------------------------
+def ADD_Handler(msgheader, sockobj, thiscommhandle):
+  # Before calling the function add_entry the 
+  query = msgheader.split(' ')[1]
+  print '****Query:\n%s\n' % query
+  # extract the query parameters
+  parameters = extract_parameters_from_query(query)
+  print '****Parameters:\n%s\n' % parameters
+  MsgToSend=parameters['entry']
+  # Add an entry with the extracted paramenters 
+  add_entry(MsgToSend)
+  stopcomm(thiscommhandle)
+
+# ------------------------------------------------------------------------------
+# Handles MODIFY requests outputs nothing and closes socket.
+# ------------------------------------------------------------------------------
+def MODIFY_Handler(msgheader, sockobj, thiscommhandle):
+  # extract query
+  query = msgheader.split(' ')[1]
+  print '****Query:\n%s\n' % query
+  # extract the query parameters
+  parameters = extract_parameters_from_query(query)
+  print '****Parameters:\n%s\n' % parameters
+  id_p = parameters['id']
+  entry_p = parameters['entry']
+  # apply
+  modify_entry(id_p, entry_p)
+  stopcomm(thiscommhandle)
+
+# ------------------------------------------------------------------------------
+# Handles MODIFY requests outputs nothing and closes socket.
+# ------------------------------------------------------------------------------
+def DELETE_Handler(msgheader, sockobj, thiscommhandle):
+  # extract query
+  query = msgheader.split(' ')[1]
+  print '****Query:\n%s\n' % query
+  # extract the query parameters
+  parameters = extract_parameters_from_query(query)
+  print '****Parameters:\n%s\n' % parameters
+  id_p = parameters['id']
+  entry_p = parameters['entry']
+  # warning if mismatching id and entry value
+  if mycontext['entry_dictionnary'][int(id_p)] != entry_p:
+    print 'warning : mismatching id and entry given. id=%s, entry=%s' % (id_p, entry_p)
+  # apply
+  delete_entry_by_id(id_p)
+  stopcomm(thiscommhandle)
+
+# ------------------------------------------------------------------------------
+# Handles other requests from browser, outputs HTML string and closes socket.
+# ------------------------------------------------------------------------------
+def other_requests_handler(msgheader, sockobj, thiscommhandle):
+  # extract the query from the HTTP request  
+  query = extract_http_request_contents(msgheader)
+  print query
+  # extract the query parameters
+  parameters = extract_parameters_from_query(query)
+  print 'handled by default handler'
+  
+  # build error answer
+  template=my_context['entry_template']
+  htmlresponse = template % ("404 Not Found\n" + msgheader)
+  res=make_http_response(404, 'Not Found', htmlresponse)
+  sockobj.send(res)
+  stopcomm(thiscommhandle) 
+
+# ------------------------------------------------------------------------------
+# Add a new entry to the list
+# Input : Entry (string)
+# ------------------------------------------------------------------------------
+def add_entry(MsgToSend):
+  entry_dictionnary = mycontext['entry_dictionnary']
+  msgid = id_generator()
+  new_entry = MsgToSend
+  entry_dictionnary[msgid] = new_entry
+  mycontext['entry_dictionnary'] = entry_dictionnary
+  
+# ------------------------------------------------------------------------------
+# Modify an entry
+# Input : Id of the entry to replace, and replacement entry (string)
+# ------------------------------------------------------------------------------
+def modify_entry(id, replacement):
+  entry_dictionnary = mycontext['entry_dictionnary']
+  entry_dictionnary[int(id)] = replacement
+  mycontext['entry_dictionnary'] = entry_dictionnary
+
+# ------------------------------------------------------------------------------
+# Delete an entry
+# Input : Id of the entry to delete
+# ------------------------------------------------------------------------------
+def delete_entry_by_id(id):
+  entry_dictionnary = mycontext['entry_dictionnary']
+  del entry_dictionnary[int(id)]
+  mycontext['entry_dictionnary'] = entry_dictionnary
+
+# ------------------------------------------------------------------------------
+# Send a message to all neighbors
+# Input : request to transfer
+# ------------------------------------------------------------------------------
+def send_to_neighbors(msg):
+  try:
+        #read the list of IP from the file neignborlist.txt file 
+        for line in file("neighborlist.txt","r"):
+          #avoid sending the msg to yourself
+          if line.strip() != mycontext['ip']:
+            #try to send the message to other servers
+            socket1 = openconn(line.strip(),mycontext['port'])
+            socket1.send(msg)
+            socket1.close()
+  except Exception, e:
+          print "Send message fail: %s, %s\n" %(type(e), e)
+
+ # ------------------------------------------------------------------------------
+       
+# ------------------------------------------------------------------------------
+# Generates a new ID. In a separate function in case we want to change it later.
+# ------------------------------------------------------------------------------
+def id_generator():
+  id_count = mycontext['id_count']
+  new_id = id_count
+  id_count +=1
+  mycontext['id_count'] = id_count
+  return new_id
+
+# ------------------------------------------------------------------------------
+# Wrap into HTTP headers
+# ------------------------------------------------------------------------------
+def make_http_response(status, status_text, htmlresponse):
+    response_template = "HTTP/1.1 %d %s\r\nContent-type: text/html\r\nContent-length: %i\r\n\r\n%s"
+    return response_template % (status, status_text, len(htmlresponse), htmlresponse)
+
+# ------------------------------------------------------------------------------
+# Utility function to extract the contents (payload) from HTTP request
+# ------------------------------------------------------------------------------
+def extract_http_request_contents(header):
+  # find content length
+  content_length = header.split('Content-Length: ')[1]
+  content_length = int(content_length.split('\r\n')[0])
+  
+  # extract the http response body and discard the header
+  contents = header[-content_length:]
+  return contents
+
+# ------------------------------------------------------------------------------
+# Utility function to extract query parameter from HTML query
+# ------------------------------------------------------------------------------
+def extract_parameters_from_query(msg):
+  # extract the query parameters as a dictionary: {name:value}
+
+  parameters={}
+  arr = msg.split('&')
+  for a in arr:
+    pp = a.split('=')
+    if len(pp)>1:
+      parameters[pp[0]] = pp[1]
+  return parameters
+
+# ------------------------------------------------------------------------------
+# Utility function to extract id of entry from HTML post query
+# ------------------------------------------------------------------------------
+def extract_id_from_post(query):
+  return (query.split('POST /entries/'))[1].split(' ')[0]
+  
+# ------------------------------------------------------------------------------
+# Outputs the blackboard html 
+# ------------------------------------------------------------------------------   
+def generate_html_page():
+  #Initialize blackboard content
+  
+  # retrieve entries from global variable
+    entry_dictionnary = mycontext['entry_dictionnary']
+    entries = ""
+    for key, value in entry_dictionnary.iteritems():
+        entries = entries + (mycontext['entry_template'] %('entries/%d' % (key), key, value))
+    # dynamic title showing Ip address, port and up time. 
+    title='Group DS 19 Board @ %s:%d. Up time: %d' %( str(mycontext['ip']), mycontext['port'], int(getruntime()) )
+    leaderdisplay = 'The Leader IP Address is:  ' +str(mycontext['leaderip'])
+    randomdisplay = 'The Maximum Random Number is:  ' +str(mycontext['leaderID'])
+    content = mycontext['boardcontents_template'] %( title, entries )
+    fullpage_h = mycontext['frontpage_header_template'] + content +  leaderdisplay + randomdisplay
+    fullpage = fullpage_h + mycontext['frontpage_footer_template'] % mycontext['authors']
+    #print entries, content, fullpage
+    return fullpage
+  
+# ------------------------------------------------------------------------------    
+# Main entry point of the program. Initalizes global variables in mycontext
+# and calls start_board() which opens a socket for incoming connections.
+# ------------------------------------------------------------------------------
+if callfunc == 'initialize':
+  # whenever this vessel gets a connection on its IP:port it'll call function board_connection_handler
+  if len(callargs) == 1 or len(callargs) == 2:
+    port = int(callargs[0])
+    if len(callargs) == 2:
+      ip=str(callargs[1])
+    else:
+      try:
+        ip = getmyip()
+      except Exception, e:
+        print "Could not get an IP\n"
+        print (type(e), e)
+        raise
+  
+  # Fail if we don't have 1 or 2 arguments  
+  else:
+    raise Exception("Usage: python <path to repy.py> <path to restrictions.default> skeleton2016.repy <port> [ip (optional)]")
+
+  mycontext['lock'] = getlock()
+    
+    #Initialize global variables
+  mycontext['message'] = ""
+  mycontext['leaderID'] = 0
+  mycontext['leaderip'] = ""
+  mycontext['ip'] = getmyip()
+  mycontext['board_lock'] = getlock()
+    #Create a (hopefully) unique ID for each vessel, ranging between 0 and 999999.
+    
+  mycontext['vesselID'] = int(randomfloat()*1000000)
+  #Initialize Port and IP
+  mycontext['port'] = port
+  mycontext['ip'] = ip
+  
+  #Initialize entry list & id generator
+  mycontext['entry_dictionnary'] = dict()
+  mycontext['id_count'] = 0
+  
+  #retrieve neighbors in neighborlist.txt
+  neighbors_file = open("neighborlist.txt", "r")
+  neighbors = neighbors_file.read().splitlines()
+  neighbors_file.close()
+  mycontext['neighbors'] = neighbors
+  
+  #We are reading and assigning a name for html files that are used by the blackboard 
+  mycontext['entry_template'] = file("entry_template.html").read()
+  mycontext['boardcontents_template'] = file("boardcontents_template.html").read()
+  mycontext['frontpage_header_template'] = file("board_frontpage_header_template.html").read()
+  mycontext['frontpage_footer_template'] = file("board_frontpage_footer_template.html").read()
+  
+  # The Authors who code this DS and displayed on the footer 
+  mycontext['authors'] = "Surafel M. Alamneh and Anusha Balabhadrapatruni"
+
+  start_board()
+  sleep(5)
+    
+  #We begin the election, starting with an empty message.
+  leaderElection("")
