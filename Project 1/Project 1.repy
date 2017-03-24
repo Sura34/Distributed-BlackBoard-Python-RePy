@@ -1,0 +1,322 @@
+# ------------------------------------------------------------------------------   
+# Start listening and handle incoming connections in board() function
+# ------------------------------------------------------------------------------   
+def start_board():
+  ip = mycontext['ip']
+  port = mycontext['port']
+  print "Listening on IP " + str(ip) +" port " + str(port)
+  try: 
+    listencommhandle = waitforconn(ip, port, board_connection_handler)
+  #default exception handler to override when we will work with a lot of sockets.
+  except Exception, e:
+    print "Exception in start_board: %s, %s\n" %(type(e), e)
+    raise
+    #pass
+
+# ------------------------------------------------------------------------------    
+# Called when an incoming message is received. 
+# --> Important starting point
+# ------------------------------------------------------------------------------    
+def board_connection_handler(ip, port, sockobj, thiscommhandle, listencommhandle):
+  try:
+    msgheader = sockobj.recv(1024) # Receive message
+    print '****Request:\n%s' % msgheader
+    # Choosing the types of communication and reacting according to each processing type behaviour 
+    if msgheader.startswith( 'POST' ):
+      #This function is defined below and it identifies the posting types. 
+      Post_Handler(msgheader, sockobj, thiscommhandle)
+    elif msgheader.startswith( 'GET' ):
+      #This function is defined below and it basically generate an html by calling the generate_html_page 
+      GET_Handler(msgheader, sockobj, thiscommhandle)
+    elif msgheader.startswith( 'ADD' ):
+      #This function is defined below and it basically call the add_entry function so that entries will be inserted with a dynamic ID
+      ADD_Handler(msgheader, sockobj, thiscommhandle)
+    elif msgheader.startswith( 'MODIFY' ):
+      #As it defines below this function will call the update_entry fumction so that the specific entry will be updated with a new value 
+      MODIFY_Handler(msgheader, sockobj, thiscommhandle)
+    elif msgheader.startswith( 'DELETE' ):
+      #This function will delete a specific entry by using its ID after calling the finction delete_entry_byid 
+      DELETE_Handler(msgheader, sockobj, thiscommhandle)
+    else:
+      #If there exist a request that is diffent that the above 5 conditions it will came here so that an appropriate output will be displayed 
+      other_requests_handler(msgheader, sockobj, thiscommhandle)
+
+   # Handling an exception error if something unexpected cames up  
+  except Exception, e:
+    print "Exception in board: %s, %s\n" %(type(e), e)
+    #raise
+
+# ------------------------------------------------------------------------------
+# Handles initial GET request from browser, outputs HTML string and closes socket.
+# ------------------------------------------------------------------------------
+def GET_Handler(msgheader, sockobj, thiscommhandle):
+  htmlresponse = generate_html_page()
+  res=make_http_response(200, 'OK', htmlresponse)
+  sockobj.send(res)
+  stopcomm(thiscommhandle) 
+
+# ------------------------------------------------------------------------------
+# Handles POST requests outputs HTML string and closes socket.
+# ------------------------------------------------------------------------------
+def Post_Handler(msgheader, sockobj, thiscommhandle):
+  # Extracting a query from the entry template 
+  query = extract_http_request_contents(msgheader)
+  print '****Query:\n%s\n' % query
+  # extracting the query parameters so that it can identify the type of query 
+  parameters = extract_parameters_from_query(query)
+  print '****Parameters:\n%s\n' % parameters
+  entry_p=parameters['entry']
+  
+  #Display the user for the confirmation of the inserted entry and close the connection so that other vessls can post an entry
+  res=make_http_response(200, 'OK', 'You have successfully posted an entry')
+  sockobj.send(res)
+  stopcomm(thiscommhandle)
+  
+  # Incase of a new entry we add it to the board with an ID
+  if msgheader.startswith( 'POST /board' ):
+    add_entry(entry_p)
+    send_to_neighbors('ADD entry=%s' % entry_p)
+    
+  # Incase of update or delete we need an entry ID that needs to be updated or deleted 
+  elif msgheader.startswith( 'POST /entries' ):
+    entry_id = extract_id_from_post(msgheader)
+    print 'id=%s' %(entry_id)
+    delete_p = parameters['delete']
+    # If the pointer have a value 1 the delete command will be applied 
+    if delete_p == '1':
+      delete_entry_by_id(entry_id)
+      send_to_neighbors('DELETE id=%s&entry=%s' % (entry_id, entry_p))
+    else:
+      # If the pointer have a value different thaan 1 the update or modify command will be applied 
+      modify_entry(entry_id, entry_p)
+      send_to_neighbors('MODIFY id=%s&entry=%s' % (entry_id, entry_p))
+  #Displaying the results     
+  print('\n')
+
+# ------------------------------------------------------------------------------
+# Handles ADD requests outputs nothing and closes socket.
+# ------------------------------------------------------------------------------
+def ADD_Handler(msgheader, sockobj, thiscommhandle):
+  # Before calling the function add_entry the 
+  query = msgheader.split(' ')[1]
+  print '****Query:\n%s\n' % query
+  # extract the query parameters
+  parameters = extract_parameters_from_query(query)
+  print '****Parameters:\n%s\n' % parameters
+  entry_p=parameters['entry']
+  # Add an entry with the extracted paramenters 
+  add_entry(entry_p)
+  stopcomm(thiscommhandle)
+
+# ------------------------------------------------------------------------------
+# Handles MODIFY requests outputs nothing and closes socket.
+# ------------------------------------------------------------------------------
+def MODIFY_Handler(msgheader, sockobj, thiscommhandle):
+  # extract query
+  query = msgheader.split(' ')[1]
+  print '****Query:\n%s\n' % query
+  # extract the query parameters
+  parameters = extract_parameters_from_query(query)
+  print '****Parameters:\n%s\n' % parameters
+  id_p = parameters['id']
+  entry_p = parameters['entry']
+  # apply
+  modify_entry(id_p, entry_p)
+  stopcomm(thiscommhandle)
+
+# ------------------------------------------------------------------------------
+# Handles MODIFY requests outputs nothing and closes socket.
+# ------------------------------------------------------------------------------
+def DELETE_Handler(msgheader, sockobj, thiscommhandle):
+  # extract query
+  query = msgheader.split(' ')[1]
+  print '****Query:\n%s\n' % query
+  # extract the query parameters
+  parameters = extract_parameters_from_query(query)
+  print '****Parameters:\n%s\n' % parameters
+  id_p = parameters['id']
+  entry_p = parameters['entry']
+  # warning if mismatching id and entry value
+  if mycontext['entry_dictionnary'][int(id_p)] != entry_p:
+    print 'warning : mismatching id and entry given. id=%s, entry=%s' % (id_p, entry_p)
+  # apply
+  delete_entry_by_id(id_p)
+  stopcomm(thiscommhandle)
+
+# ------------------------------------------------------------------------------
+# Handles other requests from browser, outputs HTML string and closes socket.
+# ------------------------------------------------------------------------------
+def other_requests_handler(msgheader, sockobj, thiscommhandle):
+  # extract the query from the HTTP request  
+  query = extract_http_request_contents(msgheader)
+  print query
+  # extract the query parameters
+  parameters = extract_parameters_from_query(query)
+  print 'handled by default handler'
+  
+  # build error answer
+  template=my_context['entry_template']
+  htmlresponse = template % ("404 Not Found\n" + msgheader)
+  res=make_http_response(404, 'Not Found', htmlresponse)
+  sockobj.send(res)
+  stopcomm(thiscommhandle) 
+
+# ------------------------------------------------------------------------------
+# Add a new entry to the list
+# Input : Entry (string)
+# ------------------------------------------------------------------------------
+def add_entry(msg):
+  entry_dictionnary = mycontext['entry_dictionnary']
+  msgid = id_generator()
+  new_entry = msg
+  entry_dictionnary[msgid] = new_entry
+  mycontext['entry_dictionnary'] = entry_dictionnary
+  
+# ------------------------------------------------------------------------------
+# Modify an entry
+# Input : Id of the entry to replace, and replacement entry (string)
+# ------------------------------------------------------------------------------
+def modify_entry(id, replacement):
+  entry_dictionnary = mycontext['entry_dictionnary']
+  entry_dictionnary[int(id)] = replacement
+  mycontext['entry_dictionnary'] = entry_dictionnary
+
+# ------------------------------------------------------------------------------
+# Delete an entry
+# Input : Id of the entry to delete
+# ------------------------------------------------------------------------------
+def delete_entry_by_id(id):
+  entry_dictionnary = mycontext['entry_dictionnary']
+  del entry_dictionnary[int(id)]
+  mycontext['entry_dictionnary'] = entry_dictionnary
+
+# ------------------------------------------------------------------------------
+# Send a message to all neighbors
+# Input : request to transfer
+# ------------------------------------------------------------------------------
+def send_to_neighbors(msg):
+  try:
+        #read the list of IP from the file neignborlist.txt file 
+        for line in file("neighborlist.txt","r"):
+          #avoid sending the msg to yourself
+          if line.strip() != mycontext['ip']:
+            #try to send the message to other servers
+            socket1 = openconn(line.strip(),63178)
+            socket1.send(msg)
+            socket1.close()
+  except Exception, e:
+          print "Send message fail: %s, %s\n" %(type(e), e)
+# ------------------------------------------------------------------------------
+# Generates a new ID. In a separate function in case we want to change it later.
+# ------------------------------------------------------------------------------
+def id_generator():
+  id_count = mycontext['id_count']
+  new_id = id_count
+  id_count +=1
+  mycontext['id_count'] = id_count
+  return new_id
+
+# ------------------------------------------------------------------------------
+# Wrap into HTTP headers
+# ------------------------------------------------------------------------------
+def make_http_response(status, status_text, htmlresponse):
+    response_template = "HTTP/1.1 %d %s\r\nContent-type: text/html\r\nContent-length: %i\r\n\r\n%s"
+    return response_template % (status, status_text, len(htmlresponse), htmlresponse)
+
+# ------------------------------------------------------------------------------
+# Utility function to extract the contents (payload) from HTTP request
+# ------------------------------------------------------------------------------
+def extract_http_request_contents(header):
+  # find content length
+  content_length = header.split('Content-Length: ')[1]
+  content_length = int(content_length.split('\r\n')[0])
+  
+  # extract the http response body and discard the header
+  contents = header[-content_length:]
+  return contents
+
+# ------------------------------------------------------------------------------
+# Utility function to extract query parameter from HTML query
+# ------------------------------------------------------------------------------
+def extract_parameters_from_query(msg):
+  # extract the query parameters as a dictionary: {name:value}
+  # example input format: comment=aa&ip=127.0.0.1&port=63178&action=Delete
+  parameters={}
+  arr = msg.split('&')
+  for a in arr:
+    pp = a.split('=')
+    if len(pp)>1:
+      parameters[pp[0]] = pp[1]
+  return parameters
+
+# ------------------------------------------------------------------------------
+# Utility function to extract id of entry from HTML post query
+# ------------------------------------------------------------------------------
+def extract_id_from_post(query):
+  return (query.split('POST /entries/'))[1].split(' ')[0]
+  
+# ------------------------------------------------------------------------------
+# Outputs the blackboard html 
+# ------------------------------------------------------------------------------   
+def generate_html_page():
+  #Initialize blackboard content
+  
+  # retrieve entries from global variable
+  entry_dictionnary = mycontext['entry_dictionnary']
+  entries = ""
+  for key, value in entry_dictionnary.iteritems():
+    entries = entries + (mycontext['entry_template'] %('entries/%d' % (key), key, value))
+  # dynamic title showing Ip address, port and up time. 
+  title='Group DS 19 Board @ %s:%d. Up time: %d' %( str(mycontext['ip']), mycontext['port'], int(getruntime()) )
+  content = mycontext['boardcontents_template'] %( title, entries )
+  fullpage_h = mycontext['frontpage_header_template'] + content
+  fullpage = fullpage_h + mycontext['frontpage_footer_template'] % mycontext['authors']
+  #print entries, content, fullpage
+  return fullpage
+  
+# ------------------------------------------------------------------------------    
+# Main entry point of the program. Initalizes global variables in mycontext
+# and calls start_board() which opens a socket for incoming connections.
+# ------------------------------------------------------------------------------
+if callfunc == 'initialize':
+  # whenever this vessel gets a connection on its IP:port it'll call function board_connection_handler
+  if len(callargs) == 1 or len(callargs) == 2:
+    port = int(callargs[0])
+    if len(callargs) == 2:
+      ip=str(callargs[1])
+    else:
+      try:
+        ip = getmyip()
+      except Exception, e:
+        print "Could not get an IP\n"
+        print (type(e), e)
+        raise
+  
+  # Fail if we don't have 1 or 2 arguments  
+  else:
+    raise Exception("Usage: python <path to repy.py> <path to restrictions.default> skeleton2016.repy <port> [ip (optional)]")
+
+  #Initialize Port and IP
+  mycontext['port'] = port
+  mycontext['ip'] = ip
+  
+  #Initialize entry list & id generator
+  mycontext['entry_dictionnary'] = dict()
+  mycontext['id_count'] = 0
+  
+  #retrieve neighbors in neighborlist.txt
+  neighbors_file = open("neighborlist.txt", "r")
+  neighbors = neighbors_file.read().splitlines()
+  neighbors_file.close()
+  mycontext['neighbors'] = neighbors
+  
+  #We are reading and assigning a name for html files that are used by the blackboard 
+  mycontext['entry_template'] = file("entry_template.html").read()
+  mycontext['boardcontents_template'] = file("boardcontents_template.html").read()
+  mycontext['frontpage_header_template'] = file("board_frontpage_header_template.html").read()
+  mycontext['frontpage_footer_template'] = file("board_frontpage_footer_template.html").read()
+  
+  # The Authors who code this DS and displayed on the footer 
+  mycontext['authors'] = "Surafel M. Alamneh and Anusha Balabhadrapatruni"
+
+  start_board()
